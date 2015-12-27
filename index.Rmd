@@ -1,0 +1,159 @@
+---
+title: "Qualitative Activity Recognition"
+author: "Pedro A. Lapido Loureiro"
+output: html_document
+---
+  
+  
+**1) Synopsis**
+
+This study can be viewed in broader terms as an example of the use of machine learning tools to quantify how well certain physical activities are made. With the increasing use of wearable devices that are able to measure human activities such as standing, walking, running, lying down, it would be interesting to focus on qualitative rather than quantitative data.
+
+The aim of the work by Ugulino and colleagues (_Ugulino, W.; Cardador, D.; Vega, K.; Velloso, E.; Milidiu, R.; Fuks, H. Wearable Computing: Accelerometers' Data Classification of Body Postures and Movements. Proceedings of 21st Brazilian Symposium on Artificial Intelligence. Advances in Artificial Intelligence - SBIA 2012. In: Lecture Notes in Computer Science. , pp. 52-61. Curitiba, PR: Springer Berlin / Heidelberg, 2012_) is to investigate the feasibility of automatically assessing the quality of execution of weight lifting exercises and the impact of providing real-time feedback to the athlete - so-called qualitative activity recognition.
+  
+**2) Importing and pre-processing data**
+  
+Initially, the training and testing data will be imported into the R session, by means of the `read.csv` function.
+  
+The call that reads the training data and transforms the listed non-numeric characters in `NA` is:
+`train <- read.csv("pml-training.csv",stringsAsFactors=FALSE,na.strings = c("NA", "#DIV/0!", ""))`
+  
+Subsequently, the columns displaying `NA` are deleted, as well as the first 7 columns of the data frame. Those colmuns contain experimental information to the authors of the study, but are irrelevant to the statistical learning model. The columns names are `X`,`user_name`,`raw_timestamp_part_1`,`raw_timestamp_part_2`,`cvtd_timestamp`,`new_window`,`num_window`.
+  
+The final test and validation data frames are, respectively: `tidy_train` and `tidy_test`, both with 53 explanatory variables.
+```{r load,echo=TRUE,results='hide',message =FALSE,warning=FALSE}
+library(knitr)
+library(rmarkdown)
+library(dplyr)
+library(data.table)
+setwd("C:/Users/Pedro/projetos_R/Machine-Learning/")
+
+train <- read.csv("pml-training.csv",stringsAsFactors=FALSE,na.strings = c("NA", "#DIV/0!", ""))
+test <- read.csv("pml-testing.csv")
+
+newtrain <- train[,-which(apply(train, 2, function(x){any(is.na(x))}))]
+newtest <- test[,-which(apply(test, 2, function(x){any(is.na(x))}))]
+
+drops <- c("X","user_name","raw_timestamp_part_1","raw_timestamp_part_2","cvtd_timestamp","new_window"
+           ,"num_window")
+
+tidytrain <- newtrain[,!(names(newtrain) %in% drops)]
+tidytrain$classe <- as.factor(tidytrain$classe)
+
+
+tidytest <- newtest[,!(names(newtest) %in% drops)]
+
+```
+  
+After removing columns dominated by NAs (see previous code chunk), it is necessary to pre-process the resulting data frame to get rid of two potential problems: variables with near-zero variance and correlated variables.
+  
+The first problem was tackled with the function `nearZervar` of the `caret` package. And the second, with the `findCorrelation` of the same package.
+  
+There were no variables with near-zero variance and variables with correlation greater than 0.65 were discarded.
+  
+*In the end of the preprocessing, there were 27 predictors left (`tidytrain_filtered` data frame).*
+
+
+```{r tidying, echo=TRUE}
+
+library(caret)
+
+dim(tidytrain)
+
+nzv <- nearZeroVar(tidytrain[,-53], saveMetrics= TRUE)
+kable(nzv)
+
+tidytrain_cor <- cor(tidytrain[,-53])
+summary(tidytrain_cor[upper.tri(tidytrain_cor)])
+
+highly_cor_descr <- findCorrelation(tidytrain_cor, cutoff = .65)
+tidytrain_filtered <- tidytrain[,-highly_cor_descr]
+
+table(tidytrain_filtered$classe)
+
+```
+  
+As can be seen in the table above, the classes are roughly balanced, except for class A that has more events than the others. This may cause problems to machine learning algorithms, but this issue will not be further discussed here and I will use the OOB errors across classes as an indication of the quality of the model.
+  
+  
+```{r plot, echo=TRUE}
+
+var_imp_plot <- featurePlot(x = tidytrain_filtered[,c("roll_dumbbell",
+                "magnet_belt_y","magnet_dumbbell_z","roll_arm")], 
+                y = tidytrain_filtered$classe,
+                scales = list(y = list(relation="free"),
+                x = list(rot = 90)),plot="box")
+
+var_imp_plot
+
+``` 
+  
+As can be seen in the graph above displaying box plots of 4 variables as a function of class of movement, it is hard to see any relation between predictors and classes.
+  
+This stresses the importance of statistical learning algorithms, as long as when the 27 variables are used in the final model, it is possible to obtain a high accuracy predictive model.
+  
+**3) Machine Learning Model** 
+  
+In order to classify the positions of body parts of the subjects using the training data, I chose a *random forest* or *decision tree forests* algorithm from the `caret` package. 
+  
+*Random forest* is an ensemble-based method, as it uses a colection of trees (the forest) to give a final prediction based on a vote. It has several advantages such as the possibility of handling both categorical or continuous variables; it selects only the most important features; it is considered an all-purpose model that has a very good performance.
+  
+The `doParallel` library was used, due to the fact that the computations are intensive. *Random forests* computations are nicely paralellized, which is another advantage of the method.
+  
+To get an estimate of the error rate of the model (out-of-bag error rate, or OOB), a 10-fold cross-validation was carried out.
+  
+
+```{r final_model, echo=TRUE,cache=TRUE}
+
+library(randomForest)
+library(caret)
+library(doParallel)
+set.seed(1011)
+
+cl <- makeCluster(detectCores())
+registerDoParallel(cl)
+
+fitControl <- trainControl(method = "repeatedcv",
+                           number = 10,
+                           repeats = 10,
+                           verboseIter=TRUE)
+grid_rf <- expand.grid(.mtry = c(2,8,14,27))
+
+caret_rf <- train(classe ~., data=tidytrain_filtered,method="rf", 
+                  metric = "Kappa",
+                  trControl = fitControl,
+                  tuneGrid = grid_rf,
+                  importance = TRUE,
+                  verbose=TRUE)
+
+caret_rf$finalModel
+
+getTrainPerf(caret_rf)
+
+varImp(caret_rf)
+
+plot.train(caret_rf,highlight=TRUE)
+
+```
+  
+**In short, the random forest model with 500 trees and mtry = 2 gave a model with an *out-of-bag* estimate of error rate of 0.95%, accuracy and *Kappa* of 99% and 98.7%, respectively.**
+  
+It is to abeserved that a confusion matrix was built with estimates of OOB errors (see above). Furthermore, the relative importance of the variables acrros the classes are displayed above. 
+  
+Furthermore, it is shown the relation between the number of randomly selected predictors for each tree (`mtry`) and the Kappa statistic that measures the accuracy of classification trees. It seems clear that `mtry = 2` was the optimal value in this problem.
+  
+
+```{r rf_pred, echo=TRUE}
+
+rf_pred <- predict(caret_rf,tidytest)
+rf_pred
+```
+  
+**Above are displayed the predictions of the test set, in order: the first observation was assigned to class `B`, the second to `A` etc.**
+  
+**4) Session Information**
+  
+```{r system_info, echo=TRUE}
+print(sessionInfo(),locale=F)
+```
+
